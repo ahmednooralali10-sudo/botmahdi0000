@@ -2893,29 +2893,23 @@ def delete_script():
 # HEALTH
 # =========================================================
 
-@app.route("/health")
-def health():
+@app.route('/raw/<script_id>')
+def get_raw_script(script_id):
+    user_agent = request.headers.get('User-Agent', '').lower()
+    
+    browsers = ['mozilla', 'chrome', 'safari', 'edge', 'opera', 'firefox', 'msie']
+    executors = ['roblox', 'delta', 'synapse', 'fluxus', 'krnl', 'hydrogen', 'electron', 'swagmode']
+    
+    is_executor = any(e in user_agent for e in executors)
+    is_browser = any(b in user_agent for b in browsers) and not is_executor
 
-    return jsonify({
-        "status":"online",
-        "platform":"MAHDI PLATFORM",
-        "version":"3.0"
-    })
+    if is_browser:
+        return WARNING_HTML, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
+    store = load_data()
+    item = store.get(script_id)
 
-# =========================================================
-# RUN
-# =========================================================
+    if not item:
+        return Response('-- Script Not Found or Expired', status=404, mimetype='text/plain')
 
-if __name__ == "__main__":
-
-    app.run(
-        host="0.0.0.0",
-        port=int(
-            os.environ.get(
-                "PORT",
-                5000
-            )
-        ),
-        debug=False
-    )
+    return Response(item['script'], status=200, mimetype='text/plain; charset=utf-8')
