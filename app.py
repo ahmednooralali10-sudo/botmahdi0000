@@ -1,5 +1,4 @@
 import os
-import json
 import secrets
 import string
 import requests
@@ -8,33 +7,18 @@ from flask import Flask, request, jsonify, Response, render_template_string, red
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(24))
 
-# بيانات قوقل (يُفضل وضعها في متغيرات البيئة Environment Variables في منصة الاستضافة)
+# إعدادات قوقل OAuth (يمكنك وضعها هنا أو كمتغيرات بيئة Environment Variables في Vercel)
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', 'ضع_هنا_Client_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', 'ضع_هنا_Client_Secret')
 
-DATA_FILE = '/tmp/scripts_store.json'
-
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    try:
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_data(data):
-    try:
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False)
-    except Exception:
-        pass
+# قاعدة بيانات مؤقتة في الذاكرة لضمان عدم حدوث خطأ 500 على Vercel
+SCRIPTS_DB = {}
 
 def generate_id(length=8):
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
-# صفحة تسجيل الدخول بحساب قوقل
+# صفحة تسجيل الدخول الإجبارية
 LOGIN_HTML = '''
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -46,7 +30,7 @@ LOGIN_HTML = '''
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { background: radial-gradient(circle at center, #0f172a 0%, #020617 100%); color: #ffffff; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; text-align: center; padding: 1rem; }
-        .card { background: rgba(30, 41, 59, 0.85); backdrop-filter: blur(16px); padding: 3rem 2rem; border-radius: 1.5qs; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8); border: 1px solid rgba(59, 130, 246, 0.3); max-width: 440px; width: 100%; border-radius: 1.5rem; }
+        .card { background: rgba(30, 41, 59, 0.85); backdrop-filter: blur(16px); padding: 3rem 2rem; border-radius: 1.5rem; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8); border: 1px solid rgba(59, 130, 246, 0.3); max-width: 440px; width: 100%; }
         .btn-google { background-color: #ffffff; color: #000000; font-weight: 700; border-radius: 50px; padding: 12px 24px; display: inline-flex; align-items: center; justify-content: center; gap: 12px; text-decoration: none; width: 100%; box-shadow: 0 4px 15px rgba(0,0,0,0.3); transition: 0.3s; }
         .btn-google:hover { background-color: #f1f5f9; transform: translateY(-2px); }
         h1 { color: #38bdf8; font-size: 2rem; margin-bottom: 1rem; font-weight: 800; }
@@ -82,7 +66,7 @@ WARNING_HTML = '''
 <body>
     <div class="card">
         <h1>🦊🛑 سنقر لا تسرق!</h1>
-        <p>هذا الرابط مخصص للتشغيل داخل اللعبة (Executor) مباشرة، ولا يمكن عرضه من خلال المتصفح.</p>
+        <p>هذا الرابط مخصص للتشغيل داخل اللعبة (Executor) مباشرة، ولا يمكن عرضه من خلال المتصفح العادي.</p>
     </div>
 </body>
 </html>
@@ -208,22 +192,26 @@ def authorize_google():
         'grant_type': 'authorization_code'
     }
     
-    res = requests.post(token_url, data=payload)
-    if res.status_code != 200:
-        return f"فشل المصادقة مع قوقل: {res.text}", 400
+    try:
+        res = requests.post(token_url, data=payload)
+        if res.status_code != 200:
+            return f"فشل المصادقة مع قوقل: {res.text}", 400
+            
+        token_data = res.json()
+        access_token = token_data.get('access_token')
         
-    token_data = res.json()
-    access_token = token_data.get('access_token')
-    
-    user_info_res = requests.get('https://www.googleapis.com/oauth2/v2/userinfo', headers={'Authorization': f'Bearer {access_token}'})
-    if user_info_res.status_code != 200:
-        return "فشل جلب بيانات المستخدم", 400
+        user_info_res = requests.get('https://www.googleapis.com/oauth2/v2/userinfo', headers={'Authorization': f'Bearer {access_token}'})
+        if user_info_res.status_code != 200:
+            return "فشل جلب بيانات المستخدم", 400
+            
+        user_info = user_info_res.json()
+        session['user'] = {
+            'name': user_info.get('name'),
+            'email': user_info.get('email')
+        }
+    except Exception as e:
+        return f"حدث خطأ أثناء الاتصال بقوقل: {str(e)}", 500
         
-    user_info = user_info_res.json()
-    session['user'] = {
-        'name': user_info.get('name'),
-        'email': user_info.get('email')
-    }
     return redirect('/')
 
 @app.route('/logout')
@@ -241,9 +229,7 @@ def create_script():
     if not script or not key:
         return jsonify({'success': False, 'error': 'مطلوب السكربت والمفتاح'}), 400
     script_id = generate_id()
-    store = load_data()
-    store[script_id] = {'script': script, 'key': key, 'owner': session['user']['email']}
-    save_data(store)
+    SCRIPTS_DB[script_id] = {'script': script, 'key': key, 'owner': session['user']['email']}
     raw_url = request.host_url.rstrip('/') + '/raw/' + script_id
     return jsonify({'success': True, 'id': script_id, 'raw_url': raw_url})
 
@@ -254,8 +240,8 @@ def get_raw_script(script_id):
     executors = ['roblox', 'delta', 'synapse', 'fluxus', 'krnl', 'hydrogen']
     if any(b in ua for b in browsers) and not any(e in ua for e in executors):
         return WARNING_HTML, 200, {'Content-Type': 'text/html; charset=utf-8'}
-    store = load_data()
-    item = store.get(script_id)
+    
+    item = SCRIPTS_DB.get(script_id)
     if not item:
         return Response('-- Script Not Found', status=404, mimetype='text/plain')
     return Response(item['script'], status=200, mimetype='text/plain; charset=utf-8')
